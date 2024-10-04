@@ -1,6 +1,7 @@
 path: "/send"
 method: "POST"
 room: "!AAAAAAAAAAAAAAAAAA:example.com"
+grace_period: 5
 message: "Hello world!"
 message_format: "plaintext"
 message_type: "m.text"

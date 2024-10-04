@@ -1,20 +1,20 @@
-# maubot-webhook - A maubot plugin to send messages using webhooks
-# Copyright (C) 2024 maubot-webhook Contributors
+# maubot-device-status - A maubot plugin to send messages using webhooks
+# Copyright (C) 2024 maubot-device-status Contributors
 #
-# This file is part of maubot-webhook.
+# This file is part of maubot-device-status.
 #
-# maubot-webhook is free software: you can redistribute it and/or modify
+# maubot-device-status is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
-# maubot-webhook is distributed in the hope that it will be useful,
+# maubot-device-status is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 # GNU Affero General Public License for more details.
 #
 # You should have received a copy of the GNU Affero General Public License
-# along with maubot-webhook. If not, see <http://www.gnu.org/licenses/>.
+# along with maubot-device-status. If not, see <http://www.gnu.org/licenses/>.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -26,6 +26,7 @@ from aiohttp.web import Request, Response
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 import mautrix.types
 import jinja2
+import time
 
 
 class Config(BaseProxyConfig):
@@ -47,6 +48,7 @@ class Config(BaseProxyConfig):
         helper.copy("path")
         helper.copy("method")
         helper.copy("room")
+        helper.copy("grace_period")
         helper.copy("message")
         helper.copy("message_format")
         helper.copy("message_type")
@@ -57,6 +59,12 @@ class Config(BaseProxyConfig):
 
         # validate base config as it also contains default values
         # for options not present in the source config.
+
+        # validate grace_period
+        grace_period = helper.base["grace_period"]
+        #if not isinstance(grace_period, int):
+        if not isinstance(grace_period, int):
+            raise ValueError("Grace period must be an integer")
 
         # validate message_format
         valid_message_formats = {"markdown", "plaintext", "html"}
@@ -87,12 +95,14 @@ class Config(BaseProxyConfig):
                                  "a username and a password, separated by a colon (<username>:<password>).")
 
 
-class WebhookPlugin(Plugin):
+class DeviceStatusPlugin(Plugin):
     # config and webapp are declared as Optional in the superclass,
     # as not every plugin is configurable and offers a webapp.
     # Re-declare these variables here for the typecheckers sake.
     config: BaseProxyConfig
     webapp: PluginWebApp
+
+    last_ping_time = time.time()
 
     @classmethod
     def get_config_class(cls) -> Type[BaseProxyConfig]:
@@ -101,9 +111,11 @@ class WebhookPlugin(Plugin):
     def on_external_config_update(self) -> None:
         old_path, old_method = self.config["path"], self.config["method"]
         old_room, old_message = self.config["room"], self.config["message"]
+        old_grace_period = self.config["grace_period"]
         super().on_external_config_update()
         new_path, new_method = self.config["path"], self.config["method"]
         new_room, new_message = self.config["room"], self.config["message"]
+        new_grace_period = self.config["grace_period"]
         if old_path != new_path or old_method != new_method:
             self.log.debug("Path or method changed, restarting webhook...")
             self.webapp.clear()
@@ -112,6 +124,8 @@ class WebhookPlugin(Plugin):
             self.reload_template("room")
         if old_message != new_message:
             self.reload_template("message")
+        if old_grace_period != new_grace_period:
+            self.reload_template("grace_period")
 
     def reload_template(self, key: str) -> None:
         self.log.debug(f"{key.capitalize()} changed, reloading template...")
@@ -215,17 +229,39 @@ class WebhookPlugin(Plugin):
                           "but the template generated an empty message.")
             return Response()
 
+        grace_period = self.config["grace_period"]
         msgtype = self.config["message_type"]
-        self.log.info(f"Sending message ({msgtype}) to room {room}: {message}")
+        current_time = time.time()
+
+        self.log.info(f"Sending message to room.")
         try:
-            if self.config["message_format"] == 'markdown':
-                await self.client.send_markdown(room, message, msgtype=msgtype)
-            elif self.config["message_format"] == 'html':
-                await self.client.send_text(room, None, html=message, msgtype=msgtype)
+            if current_time - self.last_ping_time < grace_period*60:
+                await self.client.send_text(room,
+                                                    f"Grace period was {self.last_ping_time} and is now set to {current_time} (if triggered)",
+                                                    msgtype=msgtype)
+                self.last_ping_time = current_time
             else:
-                await self.client.send_text(room, message, msgtype=msgtype)
+                await self.client.send_text(room,
+                                                    f"Grace period was {self.last_ping_time} and is now set to {current_time} (else triggered)",
+                                                    msgtype=msgtype)
+                self.last_ping_time = current_time
         except Exception as e:
             error_message = f"Failed to send message '{message}' to room {room}: {e}"
             self.log.error(error_message)
             return Response(status=500, text=error_message)
         return Response()
+
+
+        # self.log.info(f"Sending message ({msgtype}) to room {room}: {message}")
+        # try:
+        #     if self.config["message_format"] == 'markdown':
+        #         await self.client.send_markdown(room, message, msgtype=msgtype)
+        #     elif self.config["message_format"] == 'html':
+        #         await self.client.send_text(room, None, html=message, msgtype=msgtype)
+        #     else:
+        #         await self.client.send_text(room, message, msgtype=msgtype)
+        # except Exception as e:
+        #     error_message = f"Failed to send message '{message}' to room {room}: {e}"
+        #     self.log.error(error_message)
+        #     return Response(status=500, text=error_message)
+        # return Response()
