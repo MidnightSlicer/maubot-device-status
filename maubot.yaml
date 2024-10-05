@@ -1,6 +1,6 @@
 maubot: 0.3.1
 id: win.mnsr.device-status
-version: 0.0.7
+version: 0.2.5.2
 license: AGPL-3.0-or-later
 modules:
   - plugin

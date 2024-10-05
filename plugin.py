@@ -17,16 +17,13 @@
 # along with maubot-device-status. If not, see <http://www.gnu.org/licenses/>.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
-
 from typing import Dict, Optional, Type, Union
 
 from maubot import Plugin, PluginWebApp
 from aiohttp import hdrs, BasicAuth
 from aiohttp.web import Request, Response
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
-import mautrix.types
-import jinja2
-import time
+import mautrix.types, asyncio, jinja2, time
 
 
 class Config(BaseProxyConfig):
@@ -49,7 +46,7 @@ class Config(BaseProxyConfig):
         helper.copy("method")
         helper.copy("room")
         helper.copy("grace_period")
-        helper.copy("message")
+        helper.copy("device_name")
         helper.copy("message_format")
         helper.copy("message_type")
         helper.copy("auth_type")
@@ -62,7 +59,6 @@ class Config(BaseProxyConfig):
 
         # validate grace_period
         grace_period = helper.base["grace_period"]
-        #if not isinstance(grace_period, int):
         if not isinstance(grace_period, int):
             raise ValueError("Grace period must be an integer")
 
@@ -103,6 +99,7 @@ class DeviceStatusPlugin(Plugin):
     webapp: PluginWebApp
 
     last_ping_time = time.time()
+    device_known_online = False
 
     @classmethod
     def get_config_class(cls) -> Type[BaseProxyConfig]:
@@ -110,11 +107,11 @@ class DeviceStatusPlugin(Plugin):
 
     def on_external_config_update(self) -> None:
         old_path, old_method = self.config["path"], self.config["method"]
-        old_room, old_message = self.config["room"], self.config["message"]
+        old_room, old_device_name = self.config["room"], self.config["device_name"]
         old_grace_period = self.config["grace_period"]
         super().on_external_config_update()
         new_path, new_method = self.config["path"], self.config["method"]
-        new_room, new_message = self.config["room"], self.config["message"]
+        new_room, new_device_name = self.config["room"], self.config["device_name"]
         new_grace_period = self.config["grace_period"]
         if old_path != new_path or old_method != new_method:
             self.log.debug("Path or method changed, restarting webhook...")
@@ -122,8 +119,8 @@ class DeviceStatusPlugin(Plugin):
             self.register_webhook()
         if old_room != new_room:
             self.reload_template("room")
-        if old_message != new_message:
-            self.reload_template("message")
+        if old_device_name != new_device_name:
+            self.reload_template("device_name")
         if old_grace_period != new_grace_period:
             self.reload_template("grace_period")
 
@@ -158,12 +155,30 @@ class DeviceStatusPlugin(Plugin):
         self.webapp.add_route(method, path, self.handle_request)
         self.log.info(f"Webhook available at: {method} {self.webapp_url}{path}")
 
+    async def check_status(self) -> None:
+        grace_period = self.config["grace_period"]
+        device_name = self.config["device_name"]
+        msgtype = self.config["message_type"]
+        room = self.config["room"]
+        current_time = time.time()
+
+        if current_time - self.last_ping_time > (grace_period * 60 + 10):
+            await self.client.send_text(room, f"{device_name} is offline.", msgtype=msgtype)
+            self.log.info(f"{device_name} is offline.")
+        else:
+            await self.client.send_text(room, f"{device_name} check passed.", msgtype=msgtype)
+            self.log.info(f"{device_name} check passed.")
+
     async def start(self) -> None:
         self.templates: Dict[str, jinja2.Template] = {}
         self.config.load_and_update()
         self.load_template("room")
-        self.load_template("message")
+        self.load_template("device_name")
         self.register_webhook()
+
+    async def send_delayed_messages(self, room, message, msgtype):
+        await asyncio.sleep(5)
+        await self.client.send_text(room, message, msgtype=msgtype)
 
     async def handle_request(self, req: Request) -> Response:
         self.log.debug(f"Got request {req}")
@@ -220,7 +235,7 @@ class DeviceStatusPlugin(Plugin):
         # since send_markdown() and send_text() expect a RoomID
         room = mautrix.types.RoomID(room)
 
-        message: Union[str, Response] = self.render_template("message", template_variables)
+        message: Union[str, Response] = self.render_template("device_name", template_variables)
         if isinstance(message, Response):
             return message
 
@@ -229,39 +244,27 @@ class DeviceStatusPlugin(Plugin):
                           "but the template generated an empty message.")
             return Response()
 
+        self.log.info(f"Sending message to room.")
+
         grace_period = self.config["grace_period"]
+        device_name = self.config["device_name"]
         msgtype = self.config["message_type"]
+        room = self.config["room"]
         current_time = time.time()
 
-        self.log.info(f"Sending message to room.")
         try:
-            if current_time - self.last_ping_time < grace_period*60:
-                await self.client.send_text(room,
-                                                    f"Grace period was {self.last_ping_time} and is now set to {current_time} (if triggered)",
-                                                    msgtype=msgtype)
+            if current_time - self.last_ping_time < (grace_period * 60 + 10):
+                await self.client.send_text(room, f"{device_name} is online.\nLast Ping Time: {self.last_ping_time}\nCurrent Time: {current_time}", msgtype=msgtype)
                 self.last_ping_time = current_time
+                asyncio.create_task(self.send_delayed_messages(room, "Hello from the timer on the If statement", msgtype))
             else:
-                await self.client.send_text(room,
-                                                    f"Grace period was {self.last_ping_time} and is now set to {current_time} (else triggered)",
-                                                    msgtype=msgtype)
+                await self.client.send_text(room, f"{device_name} was offline, but appears to be back.\nLast Ping Time: {self.last_ping_time}\nCurrent Time: {current_time}", msgtype=msgtype)
                 self.last_ping_time = current_time
+                asyncio.create_task(self.send_delayed_messages(room, "Hello from the timer on the Else statement", msgtype))
+
         except Exception as e:
-            error_message = f"Failed to send message '{message}' to room {room}: {e}"
+            error_message = f"Failed to send message to room {room}: {e}"
             self.log.error(error_message)
             return Response(status=500, text=error_message)
+
         return Response()
-
-
-        # self.log.info(f"Sending message ({msgtype}) to room {room}: {message}")
-        # try:
-        #     if self.config["message_format"] == 'markdown':
-        #         await self.client.send_markdown(room, message, msgtype=msgtype)
-        #     elif self.config["message_format"] == 'html':
-        #         await self.client.send_text(room, None, html=message, msgtype=msgtype)
-        #     else:
-        #         await self.client.send_text(room, message, msgtype=msgtype)
-        # except Exception as e:
-        #     error_message = f"Failed to send message '{message}' to room {room}: {e}"
-        #     self.log.error(error_message)
-        #     return Response(status=500, text=error_message)
-        # return Response()

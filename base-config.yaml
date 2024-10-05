@@ -2,7 +2,7 @@ path: "/send"
 method: "POST"
 room: "!AAAAAAAAAAAAAAAAAA:example.com"
 grace_period: 5
-message: "Hello world!"
+device_name: "My Device"
 message_format: "plaintext"
 message_type: "m.text"
 auth_type:
