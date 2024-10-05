@@ -99,7 +99,8 @@ class DeviceStatusPlugin(Plugin):
     webapp: PluginWebApp
 
     last_ping_time = time.time()
-    device_known_online = False
+    device_online_count = 0
+    device_offline_count = 0
 
     @classmethod
     def get_config_class(cls) -> Type[BaseProxyConfig]:
@@ -155,6 +156,10 @@ class DeviceStatusPlugin(Plugin):
         self.webapp.add_route(method, path, self.handle_request)
         self.log.info(f"Webhook available at: {method} {self.webapp_url}{path}")
 
+    async def check_delay(self):
+        await asyncio.sleep(self.config["grace_period"] * 60)
+        await self.check_status()
+
     async def check_status(self) -> None:
         grace_period = self.config["grace_period"]
         device_name = self.config["device_name"]
@@ -162,12 +167,26 @@ class DeviceStatusPlugin(Plugin):
         room = self.config["room"]
         current_time = time.time()
 
-        if current_time - self.last_ping_time > (grace_period * 60 + 10):
-            await self.client.send_text(room, f"{device_name} is offline.", msgtype=msgtype)
-            self.log.info(f"{device_name} is offline.")
+        # Device is online
+        if current_time - self.last_ping_time < (grace_period * 60 + 10):
+            #await self.client.send_text(room, f"{device_name} is assumed online.", msgtype=msgtype)
+            if self.device_offline_count > 0:
+                self.device_offline_count = 0
+        # Device is offline
         else:
-            await self.client.send_text(room, f"{device_name} check passed.", msgtype=msgtype)
-            self.log.info(f"{device_name} check passed.")
+            if self.device_offline_count == 0:
+                await self.client.send_text(room,
+                                            f"{device_name} has not reported its status in {grace_period} minutes.",
+                                            msgtype=msgtype)
+                self.device_offline_count += 1
+            elif self.device_offline_count <= 3:
+                await self.client.send_text(room,
+                                            f"Assuming {device_name} is offline."
+                                            f"\nOffline Messages: {self.device_offline_count} of 3",
+                                            msgtype=msgtype)
+                self.device_offline_count += 1
+            self.device_online_count = 0
+            await asyncio.create_task(self.check_delay())
 
     async def start(self) -> None:
         self.templates: Dict[str, jinja2.Template] = {}
@@ -175,10 +194,6 @@ class DeviceStatusPlugin(Plugin):
         self.load_template("room")
         self.load_template("device_name")
         self.register_webhook()
-
-    async def send_delayed_messages(self, room, message, msgtype):
-        await asyncio.sleep(5)
-        await self.client.send_text(room, message, msgtype=msgtype)
 
     async def handle_request(self, req: Request) -> Response:
         self.log.debug(f"Got request {req}")
@@ -253,14 +268,21 @@ class DeviceStatusPlugin(Plugin):
         current_time = time.time()
 
         try:
+            # Device is online
             if current_time - self.last_ping_time < (grace_period * 60 + 10):
-                await self.client.send_text(room, f"{device_name} is online.\nLast Ping Time: {self.last_ping_time}\nCurrent Time: {current_time}", msgtype=msgtype)
+                if self.device_online_count == 0:
+                    await self.client.send_text(room, f"{device_name} is online.", msgtype=msgtype)
                 self.last_ping_time = current_time
-                asyncio.create_task(self.send_delayed_messages(room, "Hello from the timer on the If statement", msgtype))
+                self.device_online_count += 1
+            # Device used to be offline
             else:
-                await self.client.send_text(room, f"{device_name} was offline, but appears to be back.\nLast Ping Time: {self.last_ping_time}\nCurrent Time: {current_time}", msgtype=msgtype)
+                await self.client.send_text(room,
+                                            f"{device_name} was offline. But is now back.",
+                                            msgtype=msgtype)
                 self.last_ping_time = current_time
-                asyncio.create_task(self.send_delayed_messages(room, "Hello from the timer on the Else statement", msgtype))
+                self.device_online_count = 0
+
+            asyncio.create_task(self.check_delay())
 
         except Exception as e:
             error_message = f"Failed to send message to room {room}: {e}"
